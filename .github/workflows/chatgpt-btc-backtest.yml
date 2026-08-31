@@ -1,11 +1,10 @@
-name: Temporary trading-strategy backtests
+name: Multi-ticker current one-year cross-asset backtest
 
 on:
   push:
     branches:
-      - chatgpt-btc-minute-backtest
+      - chatgpt-cross-asset-multiticker
     paths:
-      - chatgpt_backtest/research_2pct_cross_asset.py
       - .github/workflows/chatgpt-btc-backtest.yml
 
 permissions:
@@ -14,60 +13,101 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
-      - name: Check out temporary branch
+      - name: Check out multi-ticker branch
         uses: actions/checkout@v4
         with:
-          ref: chatgpt-btc-minute-backtest
+          ref: chatgpt-cross-asset-multiticker
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Download public Bitstamp BTC/USD minute data
+      - name: Download BTC history
         run: |
           curl -L --fail --retry 5 --retry-delay 5 \
             -o /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz \
             https://raw.githubusercontent.com/ff137/bitstamp-btcusd-minute-data/main/data/historical/btcusd_bitstamp_1min_2012-2025.csv.gz
-          ls -lh /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz
 
-      - name: Download one year of U.S. one-minute bars
+      - name: Download current data through multi-ticker quarterly requests
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/equities
+          mkdir -p /tmp/combined /tmp/equities
+          ranges=(
+            '2025-08-29 00:00:00|2025-12-01 00:00:00'
+            '2025-12-01 00:00:00|2026-03-01 00:00:00'
+            '2026-03-01 00:00:00|2026-06-01 00:00:00'
+            '2026-06-01 00:00:00|2026-08-29 00:00:00'
+          )
 
-          download_one() {
-            local asset="$1"
-            local ticker="$2"
-            local output="/tmp/equities/${asset}_${ticker}.csv"
-            echo "Downloading ${asset} ${ticker}"
-            curl --get --fail --location --compressed --retry 5 --retry-delay 3 \
-              --data-urlencode "timeframe=1min" \
-              --data-urlencode "adjustment=adj_split" \
-              --data-urlencode "start=2025-08-29 00:00:00" \
-              --data-urlencode "end=2026-08-29 00:00:00" \
-              --data-urlencode "order=asc" \
-              --data-urlencode "limit=500000" \
-              --data-urlencode "format=csv" \
-              "https://www.hfmarketdata.io/v1/bars/${asset}/${ticker}" \
-              -o "$output"
-            test "$(wc -l < "$output")" -gt 1000
-            head -n 2 "$output"
+          download_asset() {
+            local asset="$1" tickers="$2"
+            local output="/tmp/combined/${asset}.csv"
+            : > "$output"
+            local first=1 i=0
+            for range in "${ranges[@]}"; do
+              local start="${range%%|*}" end="${range#*|}"
+              local part="/tmp/combined/${asset}_${i}.csv"
+              echo "${asset}: ${start} to ${end}"
+              curl --get --fail --location --compressed --retry 5 --retry-delay 2 --max-time 300 \
+                --data-urlencode "tickers=${tickers}" \
+                --data-urlencode "timeframe=1min" \
+                --data-urlencode "adjustment=adj_split" \
+                --data-urlencode "start=${start}" \
+                --data-urlencode "end=${end}" \
+                --data-urlencode "order=asc" \
+                --data-urlencode "limit=100000" \
+                --data-urlencode "format=csv" \
+                "https://www.hfmarketdata.io/v1/bars/${asset}" \
+                -o "$part"
+              if [ "$first" -eq 1 ]; then cat "$part" >> "$output"; first=0
+              else tail -n +2 "$part" >> "$output"; fi
+              echo "part rows: $(wc -l < "$part")"
+              i=$((i+1))
+            done
+            echo "${asset} total rows: $(wc -l < "$output")"
           }
 
-          for ticker in AAPL MSFT NVDA TSLA AMZN META JPM XOM; do
-            download_one stock "$ticker"
-          done
-          for ticker in SPY QQQ DIA IWM; do
-            download_one etf "$ticker"
-          done
+          download_asset stock 'AAPL,MSFT,NVDA,TSLA,AMZN,META,JPM,XOM' &
+          download_asset etf 'SPY,QQQ,DIA,IWM' &
+          wait
 
-          du -h /tmp/equities/*.csv
+          python - <<'PY'
+          import csv
+          from pathlib import Path
+          out = Path('/tmp/equities')
+          handles = {}
+          writers = {}
+          try:
+              for asset in ('stock', 'etf'):
+                  with open(f'/tmp/combined/{asset}.csv', newline='', encoding='utf-8-sig') as f:
+                      reader = csv.DictReader(f)
+                      if not reader.fieldnames or 'ticker' not in reader.fieldnames:
+                          raise RuntimeError(f'Unexpected {asset} columns: {reader.fieldnames}')
+                      for row in reader:
+                          ticker = row['ticker'].upper()
+                          key = (asset, ticker)
+                          if key not in handles:
+                              h = open(out / f'{asset}_{ticker}.csv', 'w', newline='', encoding='utf-8')
+                              handles[key] = h
+                              w = csv.DictWriter(h, fieldnames=reader.fieldnames)
+                              writers[key] = w
+                              w.writeheader()
+                          writers[key].writerow(row)
+          finally:
+              for h in handles.values():
+                  h.close()
+          for p in sorted(out.glob('*.csv')):
+              n = sum(1 for _ in p.open(encoding='utf-8'))
+              if n <= 1000:
+                  raise RuntimeError(f'Too few rows in {p}: {n}')
+              print(p.name, n)
+          PY
 
-      - name: Run BTC 2 percent and cross-asset one-year backtests
+      - name: Run the backtests
         run: |
           rm -rf chatgpt_backtest/results_cross_asset_2pct
           python chatgpt_backtest/research_2pct_cross_asset.py \
@@ -75,12 +115,12 @@ jobs:
             --equities /tmp/equities \
             --output chatgpt_backtest/results_cross_asset_2pct
 
-      - name: Commit result tables to the temporary branch
+      - name: Commit result tables
         run: |
           git config user.name "chatgpt-backtest"
           git config user.email "chatgpt-backtest@users.noreply.github.com"
           git add chatgpt_backtest/results_cross_asset_2pct
           if ! git diff --cached --quiet; then
-            git commit -m "Add 2 percent and one-year cross-asset results [skip ci]"
-            git push origin HEAD:chatgpt-btc-minute-backtest
+            git commit -m "Add current multi-ticker one-year results [skip ci]"
+            git push origin HEAD:chatgpt-cross-asset-multiticker
           fi
