@@ -7,6 +7,7 @@ on:
     paths:
       - chatgpt_backtest/btc_minute_backtest.py
       - chatgpt_backtest/btc_minute_backtest_7day_exit.py
+      - chatgpt_backtest/btc_minute_backtest_1pct.py
       - .github/workflows/chatgpt-btc-backtest.yml
 
 permissions:
@@ -34,17 +35,17 @@ jobs:
             https://raw.githubusercontent.com/ff137/bitstamp-btcusd-minute-data/main/data/historical/btcusd_bitstamp_1min_2012-2025.csv.gz
           ls -lh /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz
 
-      - name: Run seven-day forced-exit backtest
+      - name: Run 1 percent take-profit backtest
         run: |
-          python chatgpt_backtest/btc_minute_backtest_7day_exit.py \
+          python chatgpt_backtest/btc_minute_backtest_1pct.py \
             /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz
 
       - name: Commit result tables to the temporary branch
         run: |
           git config user.name "chatgpt-backtest"
           git config user.email "chatgpt-backtest@users.noreply.github.com"
-          git add chatgpt_backtest/results_7day_exit
+          git add chatgpt_backtest/results_1pct
           if ! git diff --cached --quiet; then
-            git commit -m "Add seven-day forced-exit BTC results [skip ci]"
+            git commit -m "Add 1 percent take-profit BTC results [skip ci]"
             git push origin HEAD:chatgpt-btc-minute-backtest
           fi
