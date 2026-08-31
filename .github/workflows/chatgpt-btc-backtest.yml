@@ -1,11 +1,10 @@
-name: Temporary trading-strategy backtests
+name: Parallel current one-year cross-asset backtest
 
 on:
   push:
     branches:
-      - chatgpt-btc-minute-backtest
+      - chatgpt-cross-asset-parallel
     paths:
-      - chatgpt_backtest/research_2pct_cross_asset.py
       - .github/workflows/chatgpt-btc-backtest.yml
 
 permissions:
@@ -14,37 +13,34 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
-      - name: Check out temporary branch
+      - name: Check out parallel branch
         uses: actions/checkout@v4
         with:
-          ref: chatgpt-btc-minute-backtest
+          ref: chatgpt-cross-asset-parallel
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Download public Bitstamp BTC/USD minute data
+      - name: Download BTC history
         run: |
           curl -L --fail --retry 5 --retry-delay 5 \
             -o /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz \
             https://raw.githubusercontent.com/ff137/bitstamp-btcusd-minute-data/main/data/historical/btcusd_bitstamp_1min_2012-2025.csv.gz
-          ls -lh /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz
 
-      - name: Download one year of U.S. one-minute bars
+      - name: Download current U.S. minute bars in parallel
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/equities
-
           download_one() {
-            local asset="$1"
-            local ticker="$2"
+            local asset="$1" ticker="$2"
             local output="/tmp/equities/${asset}_${ticker}.csv"
             echo "Downloading ${asset} ${ticker}"
-            curl --get --fail --location --compressed --retry 5 --retry-delay 3 \
+            curl --get --fail --location --compressed --retry 4 --retry-delay 3 --max-time 600 \
               --data-urlencode "timeframe=1min" \
               --data-urlencode "adjustment=adj_split" \
               --data-urlencode "start=2025-08-29 00:00:00" \
@@ -55,19 +51,28 @@ jobs:
               "https://www.hfmarketdata.io/v1/bars/${asset}/${ticker}" \
               -o "$output"
             test "$(wc -l < "$output")" -gt 1000
-            head -n 2 "$output"
+            echo "Finished ${ticker}: $(wc -l < "$output") rows"
           }
 
-          for ticker in AAPL MSFT NVDA TSLA AMZN META JPM XOM; do
-            download_one stock "$ticker"
-          done
-          for ticker in SPY QQQ DIA IWM; do
-            download_one etf "$ticker"
-          done
-
+          download_one stock AAPL &
+          download_one stock MSFT &
+          download_one stock NVDA &
+          download_one stock TSLA &
+          wait
+          download_one stock AMZN &
+          download_one stock META &
+          download_one stock JPM &
+          download_one stock XOM &
+          wait
+          download_one etf SPY &
+          download_one etf QQQ &
+          download_one etf DIA &
+          download_one etf IWM &
+          wait
+          head -n 2 /tmp/equities/stock_AAPL.csv
           du -h /tmp/equities/*.csv
 
-      - name: Run BTC 2 percent and cross-asset one-year backtests
+      - name: Run the backtests
         run: |
           rm -rf chatgpt_backtest/results_cross_asset_2pct
           python chatgpt_backtest/research_2pct_cross_asset.py \
@@ -75,12 +80,12 @@ jobs:
             --equities /tmp/equities \
             --output chatgpt_backtest/results_cross_asset_2pct
 
-      - name: Commit result tables to the temporary branch
+      - name: Commit result tables
         run: |
           git config user.name "chatgpt-backtest"
           git config user.email "chatgpt-backtest@users.noreply.github.com"
           git add chatgpt_backtest/results_cross_asset_2pct
           if ! git diff --cached --quiet; then
-            git commit -m "Add 2 percent and one-year cross-asset results [skip ci]"
-            git push origin HEAD:chatgpt-btc-minute-backtest
+            git commit -m "Add current one-year cross-asset results [skip ci]"
+            git push origin HEAD:chatgpt-cross-asset-parallel
           fi
