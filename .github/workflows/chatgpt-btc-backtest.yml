@@ -1,4 +1,4 @@
-name: FirstRate one-year cross-asset validation
+name: FirstRate historical one-year cross-asset validation
 
 on:
   push:
@@ -31,14 +31,13 @@ jobs:
             -o /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz \
             https://raw.githubusercontent.com/ff137/bitstamp-btcusd-minute-data/main/data/historical/btcusd_bitstamp_1min_2012-2025.csv.gz
 
-      - name: Download and normalize FirstRate one-year samples
+      - name: Download and normalize fixed one-year samples
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/equities /tmp/zips
           download_one() {
-            local kind="$1"
-            local ticker="$2"
+            local kind="$1" ticker="$2"
             local zip="/tmp/zips/${ticker}.zip"
             local output="/tmp/equities/${kind}_${ticker}.csv"
             curl -L --fail --retry 5 --retry-delay 3 --max-time 180 \
@@ -46,29 +45,31 @@ jobs:
               -o "$zip"
             local member
             member="$(unzip -Z1 "$zip" | grep -Ei '\.(txt|csv)$' | head -n 1)"
-            test -n "$member"
-            echo "datetime,open,high,low,close,volume" > "$output"
-            unzip -p "$zip" "$member" >> "$output"
+            unzip -p "$zip" "$member" > "$output"
+            sed -i '1s/^timestamp/datetime/' "$output"
             test "$(wc -l < "$output")" -gt 1000
             echo "$kind $ticker: $(sed -n '2p' "$output") ... $(tail -n 1 "$output")"
           }
           for ticker in AAPL AMZN MSFT META TSLA; do download_one stock "$ticker"; done
           for ticker in SPY QQQ DIA; do download_one etf "$ticker"; done
 
-      - name: Run the same one-year tests
+      - name: Run fixed historical one-year validation
         run: |
+          sed -i 's/EQUITY_START_DATE = "2025-08-29"/EQUITY_START_DATE = "2022-09-30"/' chatgpt_backtest/research_2pct_cross_asset.py
+          sed -i 's/EQUITY_END_DATE_EXCLUSIVE = "2026-08-29"/EQUITY_END_DATE_EXCLUSIVE = "2023-10-01"/' chatgpt_backtest/research_2pct_cross_asset.py
           rm -rf chatgpt_backtest/results_firstrate_validation
           python chatgpt_backtest/research_2pct_cross_asset.py \
             --btc /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz \
             --equities /tmp/equities \
             --output chatgpt_backtest/results_firstrate_validation
 
-      - name: Commit validation results
+      - name: Commit validation results only
         run: |
+          git checkout -- chatgpt_backtest/research_2pct_cross_asset.py
           git config user.name "chatgpt-backtest"
           git config user.email "chatgpt-backtest@users.noreply.github.com"
           git add chatgpt_backtest/results_firstrate_validation
           if ! git diff --cached --quiet; then
-            git commit -m "Add independent FirstRate validation results [skip ci]"
+            git commit -m "Add historical one-year validation results [skip ci]"
             git push origin HEAD:chatgpt-cross-asset-firstrate
           fi
