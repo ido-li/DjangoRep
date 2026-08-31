@@ -1,11 +1,10 @@
-name: Temporary trading-strategy backtests
+name: FirstRate one-year cross-asset validation
 
 on:
   push:
     branches:
-      - chatgpt-btc-minute-backtest
+      - chatgpt-cross-asset-firstrate
     paths:
-      - chatgpt_backtest/research_2pct_cross_asset.py
       - .github/workflows/chatgpt-btc-backtest.yml
 
 permissions:
@@ -14,73 +13,62 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
-      - name: Check out temporary branch
+      - name: Check out validation branch
         uses: actions/checkout@v4
         with:
-          ref: chatgpt-btc-minute-backtest
+          ref: chatgpt-cross-asset-firstrate
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Download public Bitstamp BTC/USD minute data
+      - name: Download BTC history
         run: |
           curl -L --fail --retry 5 --retry-delay 5 \
             -o /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz \
             https://raw.githubusercontent.com/ff137/bitstamp-btcusd-minute-data/main/data/historical/btcusd_bitstamp_1min_2012-2025.csv.gz
-          ls -lh /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz
 
-      - name: Download one year of U.S. one-minute bars
+      - name: Download and normalize FirstRate one-year samples
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/equities
-
+          mkdir -p /tmp/equities /tmp/zips
           download_one() {
-            local asset="$1"
+            local kind="$1"
             local ticker="$2"
-            local output="/tmp/equities/${asset}_${ticker}.csv"
-            echo "Downloading ${asset} ${ticker}"
-            curl --get --fail --location --compressed --retry 5 --retry-delay 3 \
-              --data-urlencode "timeframe=1min" \
-              --data-urlencode "adjustment=adj_split" \
-              --data-urlencode "start=2025-08-29 00:00:00" \
-              --data-urlencode "end=2026-08-29 00:00:00" \
-              --data-urlencode "order=asc" \
-              --data-urlencode "limit=500000" \
-              --data-urlencode "format=csv" \
-              "https://www.hfmarketdata.io/v1/bars/${asset}/${ticker}" \
-              -o "$output"
+            local zip="/tmp/zips/${ticker}.zip"
+            local output="/tmp/equities/${kind}_${ticker}.csv"
+            curl -L --fail --retry 5 --retry-delay 3 --max-time 180 \
+              "https://frd001.s3-us-east-2.amazonaws.com/${ticker}_1min_sample_firstratedata.zip" \
+              -o "$zip"
+            local member
+            member="$(unzip -Z1 "$zip" | grep -Ei '\.(txt|csv)$' | head -n 1)"
+            test -n "$member"
+            echo "datetime,open,high,low,close,volume" > "$output"
+            unzip -p "$zip" "$member" >> "$output"
             test "$(wc -l < "$output")" -gt 1000
-            head -n 2 "$output"
+            echo "$kind $ticker: $(sed -n '2p' "$output") ... $(tail -n 1 "$output")"
           }
+          for ticker in AAPL AMZN MSFT META TSLA; do download_one stock "$ticker"; done
+          for ticker in SPY QQQ DIA; do download_one etf "$ticker"; done
 
-          for ticker in AAPL MSFT NVDA TSLA AMZN META JPM XOM; do
-            download_one stock "$ticker"
-          done
-          for ticker in SPY QQQ DIA IWM; do
-            download_one etf "$ticker"
-          done
-
-          du -h /tmp/equities/*.csv
-
-      - name: Run BTC 2 percent and cross-asset one-year backtests
+      - name: Run the same one-year tests
         run: |
-          rm -rf chatgpt_backtest/results_cross_asset_2pct
+          rm -rf chatgpt_backtest/results_firstrate_validation
           python chatgpt_backtest/research_2pct_cross_asset.py \
             --btc /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz \
             --equities /tmp/equities \
-            --output chatgpt_backtest/results_cross_asset_2pct
+            --output chatgpt_backtest/results_firstrate_validation
 
-      - name: Commit result tables to the temporary branch
+      - name: Commit validation results
         run: |
           git config user.name "chatgpt-backtest"
           git config user.email "chatgpt-backtest@users.noreply.github.com"
-          git add chatgpt_backtest/results_cross_asset_2pct
+          git add chatgpt_backtest/results_firstrate_validation
           if ! git diff --cached --quiet; then
-            git commit -m "Add 2 percent and one-year cross-asset results [skip ci]"
-            git push origin HEAD:chatgpt-btc-minute-backtest
+            git commit -m "Add independent FirstRate validation results [skip ci]"
+            git push origin HEAD:chatgpt-cross-asset-firstrate
           fi
