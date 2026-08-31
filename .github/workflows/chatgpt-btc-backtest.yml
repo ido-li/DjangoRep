@@ -1,9 +1,9 @@
-name: Target sweep 1 through 10 percent
+name: One-year capital and target sweep
 
 on:
   push:
     branches:
-      - chatgpt-cross-asset-firstrate
+      - chatgpt-1y-capital-target-sweep
     paths:
       - .github/workflows/chatgpt-btc-backtest.yml
 
@@ -13,12 +13,12 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
-      - name: Check out validation branch
+      - name: Check out sweep branch
         uses: actions/checkout@v4
         with:
-          ref: chatgpt-cross-asset-firstrate
+          ref: chatgpt-1y-capital-target-sweep
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,7 +31,7 @@ jobs:
             -o /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz \
             https://raw.githubusercontent.com/ff137/bitstamp-btcusd-minute-data/main/data/historical/btcusd_bitstamp_1min_2012-2025.csv.gz
 
-      - name: Download and normalize fixed one-year samples
+      - name: Download and normalize fixed one-year equity samples
         shell: bash
         run: |
           set -euo pipefail
@@ -52,50 +52,226 @@ jobs:
           for ticker in AAPL AMZN MSFT META TSLA; do download_one stock "$ticker"; done
           for ticker in SPY QQQ DIA; do download_one etf "$ticker"; done
 
-      - name: Convert backtester into a 1 to 10 percent sweep
+      - name: Build one-year sweep scripts for three capital levels
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("chatgpt_backtest/research_2pct_cross_asset.py")
-          text = path.read_text(encoding="utf-8")
+          source = Path("chatgpt_backtest/research_2pct_cross_asset.py").read_text(encoding="utf-8")
+          target_rates = "TARGET_RATES = [i / 100.0 for i in range(1, 11)]"
 
-          replacements = [
+          common_replacements = [
+              ('BTC_START_TS = int(datetime(2020, 1, 7, tzinfo=timezone.utc).timestamp())',
+               'BTC_START_TS = int(datetime(2022, 9, 30, tzinfo=timezone.utc).timestamp())'),
+              ('BTC_END_TS = int(datetime(2025, 1, 7, tzinfo=timezone.utc).timestamp())',
+               'BTC_END_TS = int(datetime(2023, 9, 30, tzinfo=timezone.utc).timestamp()) - 60'),
               ('EQUITY_START_DATE = "2025-08-29"', 'EQUITY_START_DATE = "2022-09-30"'),
               ('EQUITY_END_DATE_EXCLUSIVE = "2026-08-29"', 'EQUITY_END_DATE_EXCLUSIVE = "2023-10-01"'),
-              ('RTH_END = time(16, 0)', 'RTH_END = time(16, 0)\nTARGET_RATES = [i / 100.0 for i in range(1, 11)]'),
-              ('btc_results, btc_benchmark = run_stream(iter_btc(args.btc), [0.02])', 'btc_results, btc_benchmark = run_stream(iter_btc(args.btc), TARGET_RATES)'),
-              ('"strategies": [btc_results[0.02]],', '"strategies": [btc_results[rate] for rate in TARGET_RATES],'),
-              ('target_results, benchmark = run_stream(iter_equity(path), [0.01, 0.02])', 'target_results, benchmark = run_stream(iter_equity(path), TARGET_RATES)'),
-              ('"strategies": [target_results[0.01], target_results[0.02]],', '"strategies": [target_results[rate] for rate in TARGET_RATES],'),
+              ('RTH_END = time(16, 0)', f'RTH_END = time(16, 0)\n{target_rates}'),
+              ('btc_results, btc_benchmark = run_stream(iter_btc(args.btc), [0.02])',
+               'btc_results, btc_benchmark = run_stream(iter_btc(args.btc), TARGET_RATES)'),
+              ('"strategies": [btc_results[0.02]],',
+               '"strategies": [btc_results[rate] for rate in TARGET_RATES],'),
+              ('target_results, benchmark = run_stream(iter_equity(path), [0.01, 0.02])',
+               'target_results, benchmark = run_stream(iter_equity(path), TARGET_RATES)'),
+              ('"strategies": [target_results[0.01], target_results[0.02]],',
+               '"strategies": [target_results[rate] for rate in TARGET_RATES],'),
               ('for rate in [0.01, 0.02]:', 'for rate in TARGET_RATES:'),
-              ('"btc_five_year_2pct": btc_output,', '"btc_five_year_target_sweep_1_10": btc_output,'),
-              ('args.output / "btc_2pct_result.csv",\n        [{**btc_benchmark, **btc_results[0.02]}],', 'args.output / "btc_target_sweep_1_10.csv",\n        [{**btc_benchmark, **btc_results[rate]} for rate in TARGET_RATES],'),
+              ('"btc_five_year_2pct": btc_output,', '"btc_one_year_target_sweep_1_10": btc_output,'),
+              ('args.output / "btc_2pct_result.csv",\n        [{**btc_benchmark, **btc_results[0.02]}],',
+               'args.output / "btc_target_sweep_1_10.csv",\n        [{**btc_benchmark, **btc_results[rate]} for rate in TARGET_RATES],'),
           ]
 
-          for old, new in replacements:
-              if old not in text:
-                  raise RuntimeError(f"Expected source fragment not found: {old}")
-              text = text.replace(old, new, 1)
-
-          path.write_text(text, encoding="utf-8")
+          for capital in (300, 600, 900):
+              text = source
+              capital_old = 'INITIAL_CAPITAL = 300.0'
+              capital_new = f'INITIAL_CAPITAL = {float(capital)}'
+              if capital_old not in text:
+                  raise RuntimeError(f"Expected source fragment not found: {capital_old}")
+              text = text.replace(capital_old, capital_new, 1)
+              for old, new in common_replacements:
+                  if old not in text:
+                      raise RuntimeError(f"Expected source fragment not found: {old}")
+                  text = text.replace(old, new, 1)
+              Path(f"/tmp/research_capital_{capital}.py").write_text(text, encoding="utf-8")
           PY
 
-      - name: Run target sweep
+      - name: Run 1 to 10 percent targets at 300, 600, and 900 dollars
         run: |
-          rm -rf chatgpt_backtest/results_target_sweep_1_10
-          python chatgpt_backtest/research_2pct_cross_asset.py \
-            --btc /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz \
-            --equities /tmp/equities \
-            --output chatgpt_backtest/results_target_sweep_1_10
+          rm -rf chatgpt_backtest/results_1y_capital_target_sweep
+          mkdir -p chatgpt_backtest/results_1y_capital_target_sweep
+          for capital in 300 600 900; do
+            python "/tmp/research_capital_${capital}.py" \
+              --btc /tmp/btcusd_bitstamp_1min_2012-2025.csv.gz \
+              --equities /tmp/equities \
+              --output "chatgpt_backtest/results_1y_capital_target_sweep/capital_${capital}"
+          done
 
-      - name: Commit sweep results only
+      - name: Build consolidated comparison tables
         run: |
-          git checkout -- chatgpt_backtest/research_2pct_cross_asset.py
+          python - <<'PY'
+          from __future__ import annotations
+          import csv
+          import json
+          from collections import defaultdict
+          from pathlib import Path
+          from statistics import mean, median
+
+          root = Path("chatgpt_backtest/results_1y_capital_target_sweep")
+          capitals = (300, 600, 900)
+          all_rows: list[dict[str, object]] = []
+
+          def read_csv(path: Path) -> list[dict[str, str]]:
+              with path.open(newline="", encoding="utf-8") as f:
+                  return list(csv.DictReader(f))
+
+          for capital in capitals:
+              folder = root / f"capital_{capital}"
+              for row in read_csv(folder / "btc_target_sweep_1_10.csv"):
+                  row = dict(row)
+                  row.update({"asset_type": "crypto", "ticker": "BTCUSD", "starting_capital": capital})
+                  all_rows.append(row)
+              for row in read_csv(folder / "cross_asset_results.csv"):
+                  row = dict(row)
+                  row["starting_capital"] = capital
+                  all_rows.append(row)
+
+          preferred = [
+              "asset_type", "ticker", "starting_capital", "target_net_profit_percent",
+              "required_reference_price_rise_percent", "final_total_wealth", "final_profit_loss",
+              "return_percent", "buy_and_hold_final_wealth", "buy_and_hold_return_percent",
+              "buys", "sales", "open_lots", "unrealized_pnl_on_open_lots",
+              "participation_percent_of_eligible_minutes", "average_holding_minutes_closed",
+              "maximum_drawdown_percent", "eligible_minutes", "trading_sessions",
+              "first_close", "final_close", "underlying_price_change_percent",
+          ]
+          remaining = []
+          seen = set(preferred)
+          for row in all_rows:
+              for key in row:
+                  if key not in seen:
+                      seen.add(key)
+                      remaining.append(key)
+          fields = preferred + remaining
+          with (root / "all_results.csv").open("w", newline="", encoding="utf-8") as f:
+              writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+              writer.writeheader()
+              writer.writerows(all_rows)
+
+          def num(row: dict[str, object], key: str) -> float:
+              return float(row[key])
+
+          groups: dict[tuple[str, int], list[dict[str, object]]] = defaultdict(list)
+          for row in all_rows:
+              groups[(str(row["ticker"]), int(row["starting_capital"]))].append(row)
+
+          best_rows: list[dict[str, object]] = []
+          for (ticker, capital), rows in sorted(groups.items()):
+              best = max(rows, key=lambda r: num(r, "return_percent"))
+              best_rows.append({
+                  "asset_type": best["asset_type"],
+                  "ticker": ticker,
+                  "starting_capital": capital,
+                  "best_target_percent": num(best, "target_net_profit_percent"),
+                  "best_final_wealth": num(best, "final_total_wealth"),
+                  "best_profit_loss": num(best, "final_profit_loss"),
+                  "best_return_percent": num(best, "return_percent"),
+                  "buy_and_hold_final_wealth": num(best, "buy_and_hold_final_wealth"),
+                  "buy_and_hold_return_percent": num(best, "buy_and_hold_return_percent"),
+                  "excess_return_vs_buy_hold_points": num(best, "return_percent") - num(best, "buy_and_hold_return_percent"),
+                  "buys": int(float(best["buys"])),
+                  "sales": int(float(best["sales"])),
+                  "open_lots": int(float(best["open_lots"])),
+                  "participation_percent": num(best, "participation_percent_of_eligible_minutes"),
+                  "average_hold_days": num(best, "average_holding_minutes_closed") / 1440.0,
+                  "maximum_drawdown_percent": num(best, "maximum_drawdown_percent"),
+              })
+
+          with (root / "best_target_by_asset_and_capital.csv").open("w", newline="", encoding="utf-8") as f:
+              writer = csv.DictWriter(f, fieldnames=list(best_rows[0].keys()))
+              writer.writeheader()
+              writer.writerows(best_rows)
+
+          target_groups: dict[tuple[int, int], list[dict[str, object]]] = defaultdict(list)
+          for row in all_rows:
+              key = (int(row["starting_capital"]), int(round(num(row, "target_net_profit_percent"))))
+              target_groups[key].append(row)
+
+          target_summary: list[dict[str, object]] = []
+          for (capital, target), rows in sorted(target_groups.items()):
+              equity_rows = [r for r in rows if r["asset_type"] != "crypto"]
+              all_returns = [num(r, "return_percent") for r in rows]
+              equity_returns = [num(r, "return_percent") for r in equity_rows]
+              equity_excess = [num(r, "return_percent") - num(r, "buy_and_hold_return_percent") for r in equity_rows]
+              target_summary.append({
+                  "starting_capital": capital,
+                  "target_percent": target,
+                  "btc_return_percent": next(num(r, "return_percent") for r in rows if r["asset_type"] == "crypto"),
+                  "equity_equal_weight_average_return_percent": mean(equity_returns),
+                  "equity_median_return_percent": median(equity_returns),
+                  "equity_min_return_percent": min(equity_returns),
+                  "equity_max_return_percent": max(equity_returns),
+                  "equity_equal_weight_average_excess_vs_buy_hold_points": mean(equity_excess),
+                  "equities_beating_buy_hold": sum(x > 0 for x in equity_excess),
+                  "all_nine_equal_weight_average_return_percent": mean(all_returns),
+                  "combined_equity_final_wealth": sum(num(r, "final_total_wealth") for r in equity_rows),
+                  "combined_equity_starting_capital": capital * len(equity_rows),
+              })
+
+          with (root / "target_summary_by_capital.csv").open("w", newline="", encoding="utf-8") as f:
+              writer = csv.DictWriter(f, fieldnames=list(target_summary[0].keys()))
+              writer.writeheader()
+              writer.writerows(target_summary)
+
+          capital_overview = []
+          for capital in capitals:
+              candidates = [r for r in target_summary if r["starting_capital"] == capital]
+              best_equity = max(candidates, key=lambda r: float(r["equity_equal_weight_average_return_percent"]))
+              best_all = max(candidates, key=lambda r: float(r["all_nine_equal_weight_average_return_percent"]))
+              btc_best = max(
+                  (r for r in all_rows if r["ticker"] == "BTCUSD" and int(r["starting_capital"]) == capital),
+                  key=lambda r: num(r, "return_percent"),
+              )
+              capital_overview.append({
+                  "starting_capital": capital,
+                  "best_universal_equity_target_percent": best_equity["target_percent"],
+                  "best_universal_equity_average_return_percent": best_equity["equity_equal_weight_average_return_percent"],
+                  "best_universal_equity_combined_final_wealth": best_equity["combined_equity_final_wealth"],
+                  "best_universal_all_nine_target_percent": best_all["target_percent"],
+                  "best_universal_all_nine_average_return_percent": best_all["all_nine_equal_weight_average_return_percent"],
+                  "btc_best_target_percent": num(btc_best, "target_net_profit_percent"),
+                  "btc_best_return_percent": num(btc_best, "return_percent"),
+                  "btc_best_final_wealth": num(btc_best, "final_total_wealth"),
+                  "btc_buy_hold_return_percent": num(btc_best, "buy_and_hold_return_percent"),
+              })
+
+          with (root / "capital_overview.csv").open("w", newline="", encoding="utf-8") as f:
+              writer = csv.DictWriter(f, fieldnames=list(capital_overview[0].keys()))
+              writer.writeheader()
+              writer.writerows(capital_overview)
+
+          overview = {
+              "period": {
+                  "btc_utc": "2022-09-30 00:00 through 2023-09-29 23:59",
+                  "us_equities_eastern": "2022-09-30 through 2023-09-29 regular trading hours",
+              },
+              "fixed_lot_dollars": 1.0,
+              "capital_levels": list(capitals),
+              "net_targets_percent": list(range(1, 11)),
+              "assets": sorted({str(r["ticker"]) for r in all_rows}),
+              "capital_overview": capital_overview,
+              "best_target_by_asset_and_capital": best_rows,
+              "target_summary_by_capital": target_summary,
+          }
+          (root / "overview.json").write_text(json.dumps(overview, indent=2), encoding="utf-8")
+          PY
+
+      - name: Commit sweep results
+        run: |
           git config user.name "chatgpt-backtest"
           git config user.email "chatgpt-backtest@users.noreply.github.com"
-          git add chatgpt_backtest/results_target_sweep_1_10
+          git add chatgpt_backtest/results_1y_capital_target_sweep
           if ! git diff --cached --quiet; then
-            git commit -m "Add 1 to 10 percent target sweep results [skip ci]"
-            git push origin HEAD:chatgpt-cross-asset-firstrate
+            git commit -m "Add one-year capital and target sweep results [skip ci]"
+            git push origin HEAD:chatgpt-1y-capital-target-sweep
           fi
